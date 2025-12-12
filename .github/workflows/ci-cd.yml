@@ -45,13 +45,20 @@ jobs:
     # ----------------------
     - name: Build Docker image inside deploy job
       run: |
-        docker build -t demo-django:${{ github.sha }} -f django-app/Dockerfile django-app
+        echo "Building image demo-django:${{ github.sha }}"
+        docker build \
+           -t demo-django:${{ github.sha }} \
+           -f django-app/Dockerfile \
+           django-app
 
+        echo "Verifying image exists..."
+        docker images | grep demo-django || (echo "IMAGE BUILD FAILED"; exit 1)
     # ----------------------
     # LOAD IMAGE INTO KIND
     # ----------------------
     - name: Load Docker image into KIND
       run: |
+        echo "Loading image into KIND..."
         kind load docker-image demo-django:${{ github.sha }} --name kind
 
     # ----------------------
