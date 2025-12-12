@@ -33,11 +33,6 @@ jobs:
     - uses: actions/checkout@v4
 
 
-    -name: Configure Kubeconfig
-     run: |
-       mkdir -p ~/.kube
-       echo "${{ secrets.KUBECONFIG }}" | base64 --decode > ~/.kube/config
-       kubectl config set-cluster k3s --server=https://172.25.72.65:6443 --insecure-skip-tls-verify=true
     # ----------------------
     # CREATE KIND CLUSTER
     # ----------------------
@@ -100,11 +95,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Configure Kubeconfig
-      run: |
-        mkdir -p ~/.kube
-        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > ~/.kube/config
-        kubectl config set-cluster k3s --server=https://172.25.72.65:6443 --insecure-skip-tls-verify=true
 
     # ----------------------
     # CREATE KIND CLUSTER AGAIN
