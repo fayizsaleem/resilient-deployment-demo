@@ -5,92 +5,101 @@ on:
     branches: [ main, staging ]
 
 env:
-  IMAGE_NAME: demo-django
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/resilient-deployment-demo
 
 jobs:
+
+# -------------------------
+# 1) BUILD & PUSH IMAGE
+# -------------------------
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: docker/setup-buildx-action@v2
+    - uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GHCR_PAT }}
+
+    - name: Build & Push Image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./django-app
+        file: ./django-app/Dockerfile
+        push: true
+        tags: |
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ${{ env.IMAGE_NAME }}:latest
+
+    outputs:
+      image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+# -------------------------
+# 2) DEPLOY
+# -------------------------
   deploy:
+    needs: build-and-push
     runs-on: ubuntu-latest
     environment: staging
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Create KIND Cluster
-      uses: helm/kind-action@v1.8.0
-      with:
-        cluster_name: kind
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
 
-    - name: Build Docker image
+    - name: Configure Kubeconfig
       run: |
-        echo "Building image demo-django:${{ github.sha }}"
-        docker build -t demo-django:${{ github.sha }} -f django-app/Dockerfile django-app
-        docker images | grep demo-django || (echo "IMAGE BUILD FAILED"; exit 1)
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > $HOME/.kube/config
 
-    - name: Load image into KIND
+    - name: Update image in deployment
       run: |
-        kind load docker-image demo-django:${{ github.sha }} --name kind
+        kubectl set image deployment/demo-django \
+          web=${{ needs.build-and-push.outputs.image }}
 
-    - name: Apply Kubernetes manifests
+    - name: Wait for rollout
+      id: rollout
+      continue-on-error: true
       run: |
-        # Reset any local edits to the manifest (start from committed file)
-        git checkout -- k8s/deployment.yaml
+        kubectl rollout status deployment/demo-django --timeout=90s
 
-        # Replace local placeholder image tag with actual tag for this run
-        sed -i "s|demo-django:local|demo-django:${{ github.sha }}|g" k8s/deployment.yaml
+    - name: Fail deploy job if rollout failed
+      if: steps.rollout.outcome == 'failure'
+      run: exit 1
 
-        kubectl apply -f k8s/deployment.yaml
-        kubectl apply -f k8s/service.yaml
-        kubectl apply -f k8s/webhook-receiver.yaml
-        kubectl apply -f k8s/webhook-secret.yaml
+# -------------------------
+# 3) ROLLBACK
+# -------------------------
+  rollback:
+    needs: deploy
+    if: failure()
+    runs-on: ubuntu-latest
 
-    - name: Wait for rollout and rollback on failure (with Slack)
-      id: rollout_and_maybe_rollback
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Configure Kubeconfig
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > $HOME/.kube/config
+
+    - name: Perform rollback
+      run: |
+        echo "Rolling back..."
+        kubectl rollout undo deployment/demo-django
+        kubectl rollout status deployment/demo-django --timeout=90s || true
+
+    - name: Slack Notification
+      uses: slackapi/slack-github-action@v1.24.0
       env:
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-      run: |
-        set -euo pipefail
-        echo "Waiting for deployment demo-django rollout (timeout 90s)..."
-        if kubectl rollout status deployment/demo-django --timeout=90s; then
-          echo "Rollout successful ✅"
-          # Run smoke test
-          kubectl port-forward svc/demo-django 8080:80 >/dev/null 2>&1 &
-          sleep 4
-          if curl -fsS http://127.0.0.1:8080/health; then
-            echo "Smoke test passed ✅"
-            exit 0
-          else
-            echo "Smoke test failed (status not ok) — will rollback"
-          fi
-        else
-          echo "Rollout failed or timed out — will perform rollback"
-        fi
-
-        # At this point we decide to rollback
-        echo "Attempting rollback..."
-        # If there's no previous revision, kubectl undo will fail; guard it
-        # Check rollout history
-        if kubectl rollout history deployment/demo-django --revision=1 >/dev/null 2>&1; then
-          echo "Found previous revision; running kubectl rollout undo"
-          kubectl rollout undo deployment/demo-django || true
-          kubectl rollout status deployment/demo-django --timeout=90s || true
-          ROLLBACK_MSG="Rollback executed: deployment/demo-django reverted to previous revision."
-        else
-          # If no history, we perform a pragmatic approach:
-          # 1) Keep current deployment (it may be broken),
-          # 2) If you prefer, you can re-deploy an explicit stable image here.
-          ROLLBACK_MSG="Rollback could not run: no rollout history found. Consider deploy stable image manually."
-          echo "$ROLLBACK_MSG"
-        fi
-
-        # Send a Slack notification (optional) if SLACK_WEBHOOK present
-        if [ -n "${SLACK_WEBHOOK:-}" ]; then
-          echo "Notifying Slack..."
-          PAYLOAD="{\"text\":\"🚨 CI/CD rollback triggered for repo: $GITHUB_REPOSITORY\\nMessage: ${ROLLBACK_MSG:-'Rollback attempted.'}\\nRun: $GITHUB_RUN_ID\"}"
-          curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK" || true
-        else
-          echo "No SLACK_WEBHOOK secret set; skipping Slack notify."
-        fi
-
-        # Fail the job to indicate CI detected an issue (after rollback attempt)
-        echo "Failing job to mark deployment unsuccessful (rollback attempted)."
-        exit 1
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      with:
+        payload: |
+          {
+            "text": "🚨 Rollback executed due to failed deployment"
+          }
