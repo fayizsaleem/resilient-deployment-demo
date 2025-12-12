@@ -8,56 +8,34 @@ env:
   IMAGE_NAME: demo-django
 
 jobs:
-
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Build metadata image
-      run: echo "image-tag=${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
-
-
   deploy:
     runs-on: ubuntu-latest
-    needs: build
     environment: staging
-
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-    # ---------------------------
-    # CREATE KIND CLUSTER
-    # ---------------------------
     - name: Create KIND Cluster
       uses: helm/kind-action@v1.8.0
       with:
         cluster_name: kind
 
-    # ---------------------------
-    # BUILD DOCKER IMAGE
-    # ---------------------------
     - name: Build Docker image
       run: |
+        echo "Building image demo-django:${{ github.sha }}"
         docker build -t demo-django:${{ github.sha }} -f django-app/Dockerfile django-app
-        docker images | grep demo-django || (echo "Image not built"; exit 1)
+        docker images | grep demo-django || (echo "IMAGE BUILD FAILED"; exit 1)
 
-    # ---------------------------
-    # LOAD IMAGE INTO KIND
-    # ---------------------------
-    - name: Load Docker image into KIND
+    - name: Load image into KIND
       run: |
         kind load docker-image demo-django:${{ github.sha }} --name kind
 
-    # ---------------------------
-    # APPLY UPDATED MANIFESTS
-    # ---------------------------
     - name: Apply Kubernetes manifests
       run: |
-        # Always start from a clean manifest
+        # Reset any local edits to the manifest (start from committed file)
         git checkout -- k8s/deployment.yaml
 
+        # Replace local placeholder image tag with actual tag for this run
         sed -i "s|demo-django:local|demo-django:${{ github.sha }}|g" k8s/deployment.yaml
 
         kubectl apply -f k8s/deployment.yaml
@@ -65,88 +43,54 @@ jobs:
         kubectl apply -f k8s/webhook-receiver.yaml
         kubectl apply -f k8s/webhook-secret.yaml
 
-    # ---------------------------
-    # WAIT FOR ROLLOUT
-    # ---------------------------
-    - name: Wait for rollout
-      id: rollout
-      continue-on-error: true
-      run: |
-        kubectl rollout status deployment/demo-django --timeout=90s
-
-    # ---------------------------
-    # MARK FAILURE IF ROLLOUT FAILED
-    # ---------------------------
-    - name: Mark deploy job failed
-      if: steps.rollout.outcome == 'failure'
-      run: |
-        echo "ROLLLOUT FAILED"
-        exit 1
-
-    # ---------------------------
-    # SMOKE TEST (ONLY if rollout SUCCESSFUL)
-    # ---------------------------
-    - name: Smoke test
-      if: steps.rollout.outcome == 'success'
-      run: |
-        kubectl port-forward svc/demo-django 8080:80 >/dev/null 2>&1 &
-        sleep 4
-        curl -f http://127.0.0.1:8080/health || (echo "Smoke test failed"; exit 1)
-
-
-  rollback:
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: failure()
-
-    steps:
-    - uses: actions/checkout@v4
-
-    # ---------------------------
-    # RECREATE KIND CLUSTER
-    # ---------------------------
-    - name: Create KIND Cluster
-      uses: helm/kind-action@v1.8.0
-      with:
-        cluster_name: kind
-
-    # ---------------------------
-    # CREATE ROLLOUT HISTORY (2 revisions)
-    # ---------------------------
-
-    # REVISION 1 — stable image
-    - name: Deploy revision 1 (stable)
-      run: |
-        git checkout -- k8s/deployment.yaml
-        sed -i "s|demo-django:local|demo-django:stable|g" k8s/deployment.yaml
-
-        kubectl apply -f k8s/deployment.yaml
-        kubectl rollout status deployment/demo-django --timeout=60s
-
-    # REVISION 2 — broken image
-    - name: Deploy revision 2 (failed version)
-      run: |
-        sed -i "s|demo-django:stable|demo-django:broken|g" k8s/deployment.yaml
-        kubectl apply -f k8s/deployment.yaml
-
-    # ---------------------------
-    # NOW ROLLBACK WILL WORK
-    # ---------------------------
-    - name: Rollback Deployment
-      run: |
-        echo "Running rollback..."
-        kubectl rollout undo deployment/demo-django
-        kubectl rollout status deployment/demo-django --timeout=60s || true
-
-    # ---------------------------
-    # SLACK NOTIFICATION
-    # ---------------------------
-    - name: Slack Notification
-      uses: slackapi/slack-github-action@v1.24.0
-      with:
-        payload: |
-          {
-            "text": "🚨 *Automatic Rollback Executed Successfully*\nThe deployment failed and was rolled back to a stable version."
-          }
+    - name: Wait for rollout and rollback on failure (with Slack)
+      id: rollout_and_maybe_rollback
       env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        set -euo pipefail
+        echo "Waiting for deployment demo-django rollout (timeout 90s)..."
+        if kubectl rollout status deployment/demo-django --timeout=90s; then
+          echo "Rollout successful ✅"
+          # Run smoke test
+          kubectl port-forward svc/demo-django 8080:80 >/dev/null 2>&1 &
+          sleep 4
+          if curl -fsS http://127.0.0.1:8080/health; then
+            echo "Smoke test passed ✅"
+            exit 0
+          else
+            echo "Smoke test failed (status not ok) — will rollback"
+          fi
+        else
+          echo "Rollout failed or timed out — will perform rollback"
+        fi
+
+        # At this point we decide to rollback
+        echo "Attempting rollback..."
+        # If there's no previous revision, kubectl undo will fail; guard it
+        # Check rollout history
+        if kubectl rollout history deployment/demo-django --revision=1 >/dev/null 2>&1; then
+          echo "Found previous revision; running kubectl rollout undo"
+          kubectl rollout undo deployment/demo-django || true
+          kubectl rollout status deployment/demo-django --timeout=90s || true
+          ROLLBACK_MSG="Rollback executed: deployment/demo-django reverted to previous revision."
+        else
+          # If no history, we perform a pragmatic approach:
+          # 1) Keep current deployment (it may be broken),
+          # 2) If you prefer, you can re-deploy an explicit stable image here.
+          ROLLBACK_MSG="Rollback could not run: no rollout history found. Consider deploy stable image manually."
+          echo "$ROLLBACK_MSG"
+        fi
+
+        # Send a Slack notification (optional) if SLACK_WEBHOOK present
+        if [ -n "${SLACK_WEBHOOK:-}" ]; then
+          echo "Notifying Slack..."
+          PAYLOAD="{\"text\":\"🚨 CI/CD rollback triggered for repo: $GITHUB_REPOSITORY\\nMessage: ${ROLLBACK_MSG:-'Rollback attempted.'}\\nRun: $GITHUB_RUN_ID\"}"
+          curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK" || true
+        else
+          echo "No SLACK_WEBHOOK secret set; skipping Slack notify."
+        fi
+
+        # Fail the job to indicate CI detected an issue (after rollback attempt)
+        echo "Failing job to mark deployment unsuccessful (rollback attempted)."
+        exit 1
