@@ -62,7 +62,10 @@ jobs:
         # Update image tag inside deployment file
         sed -i "s|demo-django:local|demo-django:${{ github.sha }}|g" k8s/deployment.yaml
 
-        kubectl apply -f k8s/
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+        kubectl apply -f k8s/webhook-reciever.yaml
+        kubectl apply -f k8s/webhook-secret.yaml
 
     # ----------------------
     # WAIT FOR ROLLOUT
