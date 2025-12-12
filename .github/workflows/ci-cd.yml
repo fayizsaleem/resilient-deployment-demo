@@ -8,6 +8,7 @@ env:
   IMAGE_NAME: demo-django
 
 jobs:
+
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
@@ -19,11 +20,12 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
 
-    - name: Build local image (no push needed for KIND)
+    - name: Build local Docker image (no push required for KIND)
       id: meta
       run: |
         docker build -t $IMAGE_NAME:${{ github.sha }} -f django-app/Dockerfile django-app
         echo "image-tag=$IMAGE_NAME:${{ github.sha }}" >> $GITHUB_OUTPUT
+
 
   deploy:
     runs-on: ubuntu-latest
@@ -36,13 +38,17 @@ jobs:
     - name: Create KIND Cluster
       uses: helm/kind-action@v1.8.0
 
-    - name: Load Docker image into KIND
+    - name: Build Docker image inside deploy job
       run: |
-        kind load docker-image ${{ needs.build-and-push.outputs.image-tag }}
+        docker build -t demo-django:${{ github.sha }} -f django-app/Dockerfile django-app
+
+    - name: Load image into KIND
+      run: |
+        kind load docker-image demo-django:${{ github.sha }}
 
     - name: Apply Kubernetes manifests
       run: |
-        sed -i "s|demo-django:local|${{ needs.build-and-push.outputs.image-tag }}|g" k8s/deployment.yaml
+        sed -i "s|demo-django:local|demo-django:${{ github.sha }}|g" k8s/deployment.yaml
         kubectl apply -f k8s/
 
     - name: Wait for rollout
@@ -57,6 +63,7 @@ jobs:
           exit 1
         fi
 
+
   rollback:
     runs-on: ubuntu-latest
     needs: deploy
@@ -66,7 +73,7 @@ jobs:
     - name: Create KIND Cluster
       uses: helm/kind-action@v1.8.0
 
-    - name: Rollback deployment
+    - name: Rollback Deployment
       run: |
         kubectl rollout undo deployment/demo-django || true
         kubectl rollout status deployment/demo-django --timeout=90s || true
@@ -76,7 +83,7 @@ jobs:
       with:
         payload: |
           {
-            "text": "🚨 *Automatic Rollback Executed in CI/CD*\nDeployment failed. KIND cluster rolled back to last stable version."
+            "text": "🚨 *Automatic Rollback Executed*\nDeployment failed during CI/CD pipeline. KIND cluster has been reverted to the last stable version."
           }
       env:
         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
