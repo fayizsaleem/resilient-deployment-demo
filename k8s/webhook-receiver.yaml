@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-receiver
+  labels:
+    app: webhook-receiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook-receiver
+  template:
+    metadata:
+      labels:
+        app: webhook-receiver
+    spec:
+      containers:
+        - name: webhook-receiver
+          image: webhook-receiver:local   # this matches your kind-loaded image
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: webhook-secret
+                  key: github_token
+            - name: REPO
+              value: "fayizsaleem/resilient-deployment-demo"   # <-- change if your repo name differs
+            - name: WORKFLOW_FILE
+              value: "rollback.yml"
+            - name: REF
+              value: "main"
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-receiver
+spec:
+  type: ClusterIP
+  selector:
+    app: webhook-receiver
+  ports:
+    - port: 8080
+      targetPort: 8080

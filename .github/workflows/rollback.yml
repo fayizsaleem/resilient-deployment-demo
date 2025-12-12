@@ -1,0 +1,31 @@
+name: Rollback Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      triggered_by:
+        description: 'reason'
+        required: true
+        default: 'manual'
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+    - name: Configure Kubeconfig
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > kubeconfig
+        mkdir -p $HOME/.kube
+        mv kubeconfig $HOME/.kube/config
+    - name: Rollback deployment
+      run: |
+        kubectl -n default rollout undo deployment/demo-django || true
+        kubectl -n default rollout status deployment/demo-django --timeout=120s || true
+    - name: Notify Slack
+      if: success()
+      uses: rtCamp/action-slack-notify@v2
+      with:
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        message: "Rollback workflow executed via ${{ github.event.inputs.triggered_by }}"

@@ -1,0 +1,93 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main, staging ]
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/resilient-deployment-demo
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-ref: ${{ steps.push.outputs.image }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    - name: Login to GHCR
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GHCR_PAT }}
+    - name: Build and push image
+      id: push
+      uses: docker/build-push-action@v4
+      with:
+        push: true
+        tags: |
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ${{ env.IMAGE_NAME }}:latest
+      # output the image tag
+    - name: Set image output
+      run: echo "::set-output name=image::${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: staging   # change to production for production branch or use matrix
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Configure Kubeconfig
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > kubeconfig
+        mkdir -p $HOME/.kube
+        mv kubeconfig $HOME/.kube/config
+        kubectl config current-context
+
+    - name: Deploy new image (set image)
+      run: |
+        kubectl -n default set image deployment/demo-django web=${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+    - name: Wait for rollout
+      run: kubectl -n default rollout status deployment/demo-django --timeout=120s
+
+    - name: Smoke test
+      run: |
+        # port-forward service for a moment and check /health
+        kubectl -n default port-forward svc/demo-django 8080:80 >/dev/null 2>&1 &
+        sleep 3
+        if ! curl -fsS http://127.0.0.1:8080/health; then
+          echo "SMOKE TEST FAILED"; exit 1
+        fi
+
+  rollback:
+    if: failure()
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+    - name: Configure Kubeconfig
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > kubeconfig
+        mkdir -p $HOME/.kube
+        mv kubeconfig $HOME/.kube/config
+    - name: Rollback
+      run: |
+        kubectl -n default rollout undo deployment/demo-django || true
+        kubectl -n default rollout status deployment/demo-django --timeout=120s || true
+    - name: Notify Slack (optional)
+      if: always()
+      uses: rtCamp/action-slack-notify@v2
+      with:
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        message: "Rollback executed for demo-django triggered by CI failure"

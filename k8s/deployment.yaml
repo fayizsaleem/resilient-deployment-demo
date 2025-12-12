@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: web
-        image: ghcr.io/<YOUR_GITHUB_USER>/resilient-deployment-demo:demo-0.1.0
+        image: demo-django:local
         ports:
         - containerPort: 8000
         readinessProbe:
