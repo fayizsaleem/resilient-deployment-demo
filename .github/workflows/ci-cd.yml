@@ -88,7 +88,12 @@ jobs:
         kubectl -n default rollout status deployment/demo-django --timeout=120s || true
     - name: Notify Slack (optional)
       if: always()
-      uses: rtCamp/action-slack-notify@v2
+      uses: slackapi/slack-github-action@v1.24.0
       with:
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-        message: "Rollback executed for demo-django triggered by CI failure"
+        payload: |
+          {
+             "text": "🚨 *CI/CD Rollback Triggered*\nA deployment failure occurred and automatic rollback executed successfully."
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
