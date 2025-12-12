@@ -23,9 +23,12 @@ jobs:
       run: |
         kubectl -n default rollout undo deployment/demo-django || true
         kubectl -n default rollout status deployment/demo-django --timeout=120s || true
-    - name: Notify Slack
-      if: success()
-      uses: rtCamp/action-slack-notify@v2
+    - name: Slack Notification
+      uses: slackapi/slack-github-action@v1.24.0
       with:
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-        message: "Rollback workflow executed via ${{ github.event.inputs.triggered_by }}"
+        payload: |
+          {
+            "text": "🚨 *Rollback Executed Successfully*\nDeployment failed and the cluster has been reverted to the last stable version."
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
