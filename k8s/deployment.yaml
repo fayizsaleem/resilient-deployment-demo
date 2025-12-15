@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: web
-        image: demo-django:stable
+        image: demo-django:broken
         ports:
         - name: http
           containerPort: 8000

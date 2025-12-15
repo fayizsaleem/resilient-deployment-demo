@@ -1,5 +1,5 @@
 from django.http import JsonResponse
 
 def health(request):
-    return JsonResponse({"status": "ok"}, status=200)
+    return JsonResponse({"status": "error"}, status=500)
 
