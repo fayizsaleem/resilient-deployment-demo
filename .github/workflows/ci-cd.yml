@@ -72,7 +72,7 @@ jobs:
     # WAIT FOR ROLLOUT
     # ----------------------
     - name: Wait for rollout
-      run: kubectl rollout status deployment/demo-django --timeout=90s
+      run: kubectl rollout status deployment/demo-django --timeout=300s
 
     # ----------------------
     # SMOKE TEST
